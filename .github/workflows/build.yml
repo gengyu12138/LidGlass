@@ -1,0 +1,35 @@
+name: Build macOS preview
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and verify
+        run: |
+          zsh -n build.sh
+          zsh -n package.sh
+          plutil -lint Info.plist
+          zsh build.sh
+          codesign --verify --strict --verbose=2 build/LidGlass.app
+      - name: Package preview
+        run: |
+          zsh package.sh
+          cd dist
+          shasum -a 256 -c SHA256SUMS.txt
+          hdiutil verify LidGlass-*-arm64-preview.dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LidGlass-arm64-preview
+          path: dist/*
+          if-no-files-found: error

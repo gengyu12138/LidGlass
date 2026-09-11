@@ -1,0 +1,12 @@
+/build/
+/dist/
+.DS_Store
+*.p12
+*.pfx
+*.p8
+*.key
+*.cer
+*.certSigningRequest
+.env
+.env.*
+/审核记录.md
