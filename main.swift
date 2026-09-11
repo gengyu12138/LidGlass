@@ -87,7 +87,7 @@ final class GlassView: MTKView, MTKViewDelegate {
         guard let mask = gradient.outputImage?.cropped(to: extent) else { return }
         var frame = source.clampedToExtent()
             .applyingFilter("CIMaskedVariableBlur", parameters: [
-                kCIInputRadiusKey: 64 * p,
+                kCIInputRadiusKey: 96 * p,
                 "inputMask": mask
             ])
             .cropped(to: extent)
