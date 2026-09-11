@@ -54,8 +54,31 @@ final class LidSensor {
 final class GlassView: MTKView, MTKViewDelegate {
     private let context: CIContext
     private let queue: MTLCommandQueue
-    var snapshot: CIImage?
-    var progress: Double = 0
+    private var mask: CIImage?
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    private(set) var needsRender = true
+    private(set) var hasRenderedFrame = false
+    private var renderInFlight = false
+    private var snapshotGeneration = 0
+    var snapshot: CIImage? {
+        didSet {
+            snapshotGeneration += 1
+            hasRenderedFrame = false
+            needsRender = true
+            mask = nil
+            guard let extent = snapshot?.extent else { return }
+            // 同一轮快照的渐变不随角度变化，只生成一次。
+            let gradient = CIFilter.smoothLinearGradient()
+            gradient.point0 = CGPoint(x: 0, y: extent.height * 0.95)
+            gradient.point1 = CGPoint(x: 0, y: extent.height * 0.05)
+            gradient.color0 = .white
+            gradient.color1 = .black
+            mask = gradient.outputImage?.cropped(to: extent)
+        }
+    }
+    var progress: Double = 0 {
+        didSet { if progress != oldValue { needsRender = true } }
+    }
 
     init?(glassFrame frame: NSRect) {
         guard let gpu = MTLCreateSystemDefaultDevice(), let queue = gpu.makeCommandQueue() else { return nil }
@@ -71,20 +94,13 @@ final class GlassView: MTKView, MTKViewDelegate {
     }
 
     required init(coder: NSCoder) { fatalError("不使用 Storyboard") }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRender = true }
 
     func draw(in view: MTKView) {
-        guard let source = snapshot, let drawable = currentDrawable,
+        guard !renderInFlight, let source = snapshot, let mask, let drawable = currentDrawable,
               let command = queue.makeCommandBuffer() else { return }
         let p = CGFloat(progress)
         let extent = source.extent
-        // Core Image 原点在左下：顶部白色达到最大模糊半径，向下过渡到黑色并恢复清晰。
-        let gradient = CIFilter.smoothLinearGradient()
-        gradient.point0 = CGPoint(x: 0, y: extent.height * 0.95)
-        gradient.point1 = CGPoint(x: 0, y: extent.height * 0.05)
-        gradient.color0 = .white
-        gradient.color1 = .black
-        guard let mask = gradient.outputImage?.cropped(to: extent) else { return }
         var frame = source.clampedToExtent()
             .applyingFilter("CIMaskedVariableBlur", parameters: [
                 kCIInputRadiusKey: 96 * p,
@@ -96,9 +112,24 @@ final class GlassView: MTKView, MTKViewDelegate {
             y: drawableSize.height / extent.height))
         context.render(frame, to: drawable.texture, commandBuffer: command,
                        bounds: CGRect(origin: .zero, size: drawableSize),
-                       colorSpace: CGColorSpaceCreateDeviceRGB())
+                       colorSpace: colorSpace)
+        let token = snapshotGeneration
+        renderInFlight = true
+        command.addCompletedHandler { [weak self] completed in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.renderInFlight = false
+                guard token == self.snapshotGeneration else { return }
+                if completed.status == .completed {
+                    self.hasRenderedFrame = true
+                } else {
+                    self.needsRender = true
+                }
+            }
+        }
         command.present(drawable)
         command.commit()
+        needsRender = false
     }
 }
 
@@ -108,9 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let info = NSMenuItem(title: "读取角度…", action: nil, keyEquivalent: "")
     private let toggle = NSMenuItem(title: "启用角度动画", action: #selector(toggleEnabled), keyEquivalent: "")
     private var timer: Timer?
+    private var lastTick = CACurrentMediaTime()
     private var window: NSWindow?
     private var glass: GlassView?
-    private var enabled = true
+    private var enabled = UserDefaults.standard.object(forKey: "automaticBlurEnabled") as? Bool ?? true
     private var suspended = false
     private var suspensionReasons = Set<String>()
     private var captureError: String?
@@ -147,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(info)
         menu.addItem(.separator())
         toggle.target = self
-        toggle.state = .on
+        toggle.state = enabled ? .on : .off
         menu.addItem(toggle)
         for (title, action) in [
             ("打开控制窗口", #selector(showControls)),
@@ -178,8 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(displayChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
-        RunLoop.main.add(timer!, forMode: .common)
+        updateTimer()
         showControls()
     }
 
@@ -272,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             actions.spacing = 8
             stack.addArrangedSubview(actions)
             let guidance = NSTextField(wrappingLabelWithString:
-                "顶部更朦胧，底部更清晰。合至 88° 进入，开至 92° 退出。\n预览期间可按 Esc 恢复桌面。")
+                "顶部更朦胧，底部更清晰。合至 88° 进入，开至 92° 退出。\n本窗口有焦点时，可按 Esc 恢复桌面。")
             guidance.font = .systemFont(ofSize: 12)
             guidance.textColor = .secondaryLabelColor
             stack.addArrangedSubview(guidance)
@@ -321,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleEnabled() {
         enabled.toggle()
+        UserDefaults.standard.set(enabled, forKey: "automaticBlurEnabled")
         toggle.state = enabled ? .on : .off
         reset()
         updateControls()
@@ -338,7 +370,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !suspended else { return }
         sensor.connect()
         reset()
-        armed = true
     }
 
     private func pauseReason(_ name: Notification.Name) -> String {
@@ -373,6 +404,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         armed = false
         angleEffectActive = false
         needsFreshCapture = true
+        lastTick = CACurrentMediaTime()
+        updateTimer()
     }
 
     @objc private func preview() {
@@ -407,7 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             detailLabel.stringValue = "只在本机读取本轮桌面快照，请稍候。"
         } else if previewStart != nil {
             stateLabel.stringValue = holdingPreview ? "保持预览中" : "正在播放预览"
-            detailLabel.stringValue = "点击“恢复桌面”或按 Esc 可立即结束。"
+            detailLabel.stringValue = "点击“恢复桌面”可立即结束；本窗口有焦点时也可按 Esc。"
         } else if !enabled {
             stateLabel.stringValue = "自动虚化已关闭"
             detailLabel.stringValue = "仍可使用下方按钮预览，开启开关后恢复角度控制。"
@@ -427,11 +460,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func updateTimer() {
+        let animating = (previewStart != nil && !holdingPreview) || abs(target - progress) > 0.00001
+            || (glass?.snapshot != nil && glass?.needsRender == true)
+        let interval = suspended ? 1.0 : animating ? 1.0 / 60 : enabled ? 1.0 / 30 : 0.2
+        guard timer?.timeInterval != interval else { return }
+        timer?.invalidate()
+        let next = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
+        next.tolerance = interval * 0.1
+        timer = next
+        RunLoop.main.add(next, forMode: .common)
+    }
+
     private func tick() {
         let now = CACurrentMediaTime()
+        let elapsed = min(0.1, max(0, now - lastTick))
+        lastTick = now
+        defer { updateTimer() }
         if now - lastPermissionCheck >= 1 {
             lastPermissionCheck = now
-            captureAuthorized = CGPreflightScreenCaptureAccess()
+            let authorized = CGPreflightScreenCaptureAccess()
+            if captureAuthorized && !authorized { reset() }
+            captureAuthorized = authorized
         }
         if now - lastUIUpdate >= 0.2 {
             lastUIUpdate = now
@@ -479,8 +529,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if target > 0.0001, needsFreshCapture {
             capture()
         }
-        let previous = progress
-        progress += (target - progress) * 0.24
+        if let glass, glass.snapshot != nil, !glass.hasRenderedFrame {
+            glass.progress = 0
+            glass.draw()
+            if previewStart != nil { previewStart = now }
+            return
+        }
+        // 保留原来 60 Hz 下的手感；掉帧或空闲降频时按实际时间推进。
+        progress += (target - progress) * (1 - pow(0.76, elapsed * 60))
         if abs(target - progress) < 0.0005 { progress = target }
         guard let glass, glass.snapshot != nil else { return }
         if progress <= 0.0001, target == 0, !angleEffectActive {
@@ -489,9 +545,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             needsFreshCapture = true
             return
         }
-        if window?.isVisible != true || abs(previous - progress) > 0.00001 {
-            glass.progress = progress
+        glass.progress = progress
+        if window?.isVisible != true || glass.needsRender {
             glass.draw()
+        }
+        // 第一次 Metal 绘制可能较慢，首帧完成前保持隐藏，避免显示空白或旧纹理。
+        if glass.hasRenderedFrame {
             // 弱虚化时逐渐混入截图，避免刚越过阈值就整屏替换真实桌面。
             window?.alphaValue = min(1, progress / 0.04)
             if window?.isVisible != true { window?.orderFrontRegardless() }
@@ -561,8 +620,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate()
         reset()
+        timer?.invalidate()
     }
 }
 

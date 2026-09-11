@@ -1,6 +1,6 @@
 # 签名与 Apple 公证
 
-v0.1.1 是 **ad-hoc 签名、未公证** 的预览版。`codesign --verify` 通过只表示签名结构完整，不代表 Apple 验证了开发者身份，也不代表 Gatekeeper 会允许首次启动。
+v0.1.2 是 **ad-hoc 签名、未公证** 的预览版。`codesign --verify` 通过只表示签名结构完整，不代表 Apple 验证了开发者身份，也不代表 Gatekeeper 会允许首次启动。
 
 ## 正式分发需要什么
 
@@ -30,7 +30,7 @@ zsh package.sh
 通过 `xcrun notarytool store-credentials` 的交互提示将自己的公证凭据保存为 `LidGlass-notary` 配置，然后提交 ZIP：
 
 ```sh
-xcrun notarytool submit dist/LidGlass-0.1.1-arm64-preview.zip \
+xcrun notarytool submit dist/LidGlass-0.1.2-arm64-preview.zip \
   --keychain-profile LidGlass-notary --wait
 ```
 

@@ -1,4 +1,4 @@
-LidGlass 0.1.1 — 未公证预览版
+LidGlass 0.1.2 — 未公证预览版
 
 要求：macOS 14 或更新版本、Apple Silicon MacBook。
 自动效果需要兼容的屏幕角度传感器；目前只在 MacBook Pro M1 Pro 上读取过角度，其他机型尚未验证。
